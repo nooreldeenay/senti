@@ -3,13 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --experimental-https",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
     "@google/genai": "^1.42.0",
+    "@types/katex": "^0.16.8",
+    "html-to-image": "^1.11.13",
+    "katex": "^0.16.38",
     "next": "16.1.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
