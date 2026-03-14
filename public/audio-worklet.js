@@ -19,9 +19,10 @@ class PCM16Processor extends AudioWorkletProcessor {
         this.buffer[this.bufferIndex++] = sample < 0 ? sample * 32768 : sample * 32767;
         
         if (this.bufferIndex >= this.bufferSize) {
-          // Send a copy of the buffer
-          const chunk = this.buffer.slice();
-          this.port.postMessage(chunk.buffer, [chunk.buffer]);
+          // Transfer ownership of the current buffer to the main thread
+          this.port.postMessage(this.buffer.buffer, [this.buffer.buffer]);
+          // Allocate a new buffer for the next cycle
+          this.buffer = new Int16Array(this.bufferSize);
           this.bufferIndex = 0;
         }
       }

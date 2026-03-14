@@ -12,8 +12,9 @@ export class GeminiLiveAPI {
   // Callbacks
   public onStateChange: (state: 'disconnected' | 'connecting' | 'connected' | 'error', errorMsg?: string) => void = () => { };
   public onMessage: (msg: any) => void = () => { };
+  /** Called with raw RMS value (0.0–1.0 range) for UI volume display. */
   public onVolumeChange: (volume: number) => void = () => { };
-  // Called when Gemini invokes a function tool. Handler must call sendToolResponse when done.
+  /** Called when Gemini invokes a function tool. Handler must call sendToolResponse when done. */
   public onToolCall: (name: string, args: Record<string, any>, id: string) => void = () => { };
   public onAgentStatusChange: (status: 'disconnected' | 'connected' | 'speaking' | 'thinking') => void = () => { };
 
@@ -21,7 +22,7 @@ export class GeminiLiveAPI {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private isReconnecting = false;
-  private reconnectTimeout: any = null;
+  private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private isUserInitiatedDisconnect = false;
   private toolCallPending = false;
 
@@ -31,9 +32,10 @@ export class GeminiLiveAPI {
   // Settings
   private audioDeviceId?: string;
   private isMuted: boolean = false;
-  private noiseThreshold: number = 0.0015; // RMS threshold (~ -56dB)
+  private noiseThreshold: number = 0.0005; // RMS threshold (~-66dB)
   private framesBelowThreshold: number = 0;
-  private readonly GATE_CLOSURE_MS = 500; // How long to wait before closing gate
+  private readonly GATE_CLOSURE_MS = 500;
+  private activeSources: AudioBufferSourceNode[] = [];
 
   constructor() { }
 
@@ -78,37 +80,44 @@ export class GeminiLiveAPI {
     }
   }
 
-  // Sends a PCM Int16Array as base64 audio to Gemini
+  /**
+   * Encodes a PCM Int16Array to base64 and sends it to Gemini.
+   * 
+   * PERFORMANCE NOTE: We use a chunked approach for String.fromCharCode
+   * to avoid spreading large arrays as function arguments, which can
+   * overflow the JS call stack and cause audio stuttering.
+   */
   private sendPcmChunk(pcmData: Int16Array) {
-    if (!this.session || this.isMuted || this.toolCallPending) return;
+    if (!this.session || this.isMuted) return;
 
-    // Volume feedback & Noise Gate
+    // Compute RMS for volume feedback & noise gate
     let sumSquares = 0;
     for (let i = 0; i < pcmData.length; i++) {
       const normalized = pcmData[i] / 32768.0;
       sumSquares += normalized * normalized;
     }
     const rms = Math.sqrt(sumSquares / pcmData.length);
-    this.onVolumeChange(rms * 100); // Scale for UI feedback
 
-    // Noise gate logic
+    // Emit raw RMS (0.0-1.0) — let the UI normalize it
+    this.onVolumeChange(rms);
+
+    // Noise gate: suppress continuous silence to avoid wasting bandwidth
     if (rms < this.noiseThreshold) {
       this.framesBelowThreshold++;
       const msBelow = (this.framesBelowThreshold * 2048) / 16000 * 1000;
-      if (msBelow > this.GATE_CLOSURE_MS) {
-        // Gate is closed — skip sending
-        return;
-      }
+      if (msBelow > this.GATE_CLOSURE_MS) return; // Gate is closed
     } else {
       this.framesBelowThreshold = 0;
     }
 
-    console.debug(`[LiveAPI] RMS: ${rms.toFixed(5)} (Threshold: ${this.noiseThreshold})`);
-
-    // Encode to base64
+    // Base64 encode: use chunked String.fromCharCode to avoid call stack overflow
+    // (spreading large Uint8Arrays with `...` crashes V8 for large audio buffers)
     const bytes = new Uint8Array(pcmData.buffer);
+    const CHUNK = 0x8000; // 32 KB chunks — safe below V8 argument limit
     let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[]);
+    }
     const base64Audio = btoa(binary);
 
     try {
@@ -121,12 +130,12 @@ export class GeminiLiveAPI {
   }
 
   private async initAudioPipeline() {
-    // 2a. Input AudioContext at 16kHz for microphone capture
+    // Input AudioContext at 16kHz for microphone capture
     this.inputContext = new (window.AudioContext || (window as any).webkitAudioContext)({
       sampleRate: 16000,
     });
 
-    // 2b. Playback AudioContext at 24kHz — must match Gemini's output rate exactly
+    // Playback AudioContext at 24kHz — must match Gemini's output rate exactly
     this.playbackContext = new (window.AudioContext || (window as any).webkitAudioContext)({
       sampleRate: 24000,
     });
@@ -150,7 +159,7 @@ export class GeminiLiveAPI {
 
     const source = this.inputContext.createMediaStreamSource(this.audioStream);
 
-    // Try AudioWorklet first (preferred), fall back to ScriptProcessorNode for older browsers (e.g. older iOS Safari)
+    // Try AudioWorklet first (preferred), fall back to ScriptProcessorNode for older browsers
     const supportsWorklet = typeof AudioWorkletNode !== 'undefined' && this.inputContext.audioWorklet;
     if (supportsWorklet) {
       try {
@@ -194,7 +203,6 @@ export class GeminiLiveAPI {
     this.isUserInitiatedDisconnect = false;
     this.onStateChange('connecting');
     try {
-      // Check mediaDevices availability (requires HTTPS on non-localhost)
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Microphone access requires a secure connection (HTTPS). Please access via HTTPS.');
       }
@@ -204,8 +212,8 @@ export class GeminiLiveAPI {
       const res = await fetch('/token');
       const data = await res.json();
       if (!res.ok || !data.token) throw new Error(data.error || 'Failed to get auth token');
-      console.log("[LiveAPI] Token acquired.");
       const token = data.token;
+      console.log("[LiveAPI] Token acquired.");
 
       // 2. Set up audio pipeline (input 16kHz + playback 24kHz)
       await this.initAudioPipeline();
@@ -218,7 +226,6 @@ export class GeminiLiveAPI {
       this.session = await ai.live.connect({
         model: this.currentModel,
         config: {
-          // responseModalities must be at the top level of config (not generationConfig)
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Sadaltager" } } },
           systemInstruction: "You are an empathetic, highly patient Socratic Personal Tutor with two distinct mental modes. You are observing a student's whiteboard in real-time.\n\nMode 1 (Explaining Mode): When you are actively teaching or explaining a topic, use a PROACTIVE visual-first approach. Explain the topic using visual tools, ask for confirmation ONCE, and WAIT. DO NOT speak again until the user confirms understanding.\nMode 2 (Observing Mode): When the student is working on the whiteboard or thinking, you enter Observing Mode. In this mode, you MUST REMAIN SILENT and just watch the whiteboard. YOU SHOULD ONLY SPEAK IF you notice the student making a specific mistake, at which point you should gently guide them.\n\nLearning Plan Management:\n- Maintain the 'Learning Plan' in the sidebar.\n- If a student specifies a broad goal, ASK if they want a 'Learning Plan' before calling create_learning_plan.\n- IMMEDIATELY after starting a topic, use update_learning_progress(topic_id, 'in_progress').\n- IMMEDIATELY after the student confirms understanding, use update_learning_progress(topic_id, 'completed', notes='...').\n\nTutoring Style (Proactive Socratic):\n- Use visual tools: show_equation, generate_diagram, generate_graph.\n- VAD ROBUSTNESS: Do not treat transient noise as confirmation. If unsure, wait or ask 'Should we proceed?'.\n\nBehavioral Directives:\n- Confirmation-Led: Never 'auto-advance'. Respect the student's pace.\n- Identify, Don't Correct: If you spot an error, ask a guiding question.\n- Breathing Room: Use encouraging, low-pressure language.\n\nVoice Persona: Warm, calm, and slightly academic. Avoid being chatty.",
@@ -389,28 +396,11 @@ export class GeminiLiveAPI {
   }
 
   private sendHandshakeMessage() {
-    // Anchor the model to your tools before streaming audio
-    // This ensures subsequent turns are part of a stable session context
-    // Removed per user request to not send initial handshake text
+    this.sendClientContent("Greeting: Introduce yourself briefly as Senti, the student's Socratic Personal Tutor. Acknowledge that you are watching the whiteboard and are ready to help them learn anything today. Keep it warm and concise.");
   }
 
   private handleWsMessage(response: any) {
     this.onMessage(response);
-
-    // Exhaustive logging for debugging tool calls (Uncomment only if needed)
-    try {
-      /*
-      const keys = Object.keys(response);
-      console.log(`[LiveAPI] Message Keys: ${keys.join(', ')}`);
-      if (response.toolCall) console.log(`[LiveAPI] toolCall detected!`);
-      if (response.serverContent) console.log(`[LiveAPI] serverContent Keys: ${Object.keys(response.serverContent).join(', ')}`);
-      
-      const safe = JSON.parse(JSON.stringify(response, (k, v) =>
-        k === 'data' && typeof v === 'string' && v.length > 50 ? `[base64 ${v.length}c]` : v
-      ));
-      console.debug("[LiveAPI] ←", JSON.stringify(safe));
-      */
-    } catch { }
 
     // Handle tool calls
     if (response.toolCall?.functionCalls?.length) {
@@ -431,13 +421,21 @@ export class GeminiLiveAPI {
     }
 
     const content = response.serverContent;
-    if (!content) {
-      console.debug("[LiveAPI] Non-content message:", Object.keys(response).join(', '));
+    if (!content) return;
+
+    if (content.interrupted) {
+      console.log("[LiveAPI] AI Interrupted by user speech. Clearing playback.");
+      this.activeSources.forEach(s => {
+        try { s.stop(); } catch (_) { }
+      });
+      this.activeSources = [];
+      this.nextPlayTime = 0;
+      this.onAgentStatusChange('connected');
       return;
     }
 
     if (content.turnComplete) {
-      this.onAgentStatusChange('connected'); // meaning idle/listening
+      this.onAgentStatusChange('connected');
     }
 
     const parts = content?.modelTurn?.parts;
@@ -445,11 +443,8 @@ export class GeminiLiveAPI {
 
     for (const part of parts) {
       if (part.inlineData?.data) {
-        // console.debug(`[LiveAPI] Audio chunk: ${part.inlineData.mimeType}, ${part.inlineData.data.length} chars`);
         this.onAgentStatusChange('speaking');
         this.playAudioChunk(part.inlineData.data);
-      } else if (part.text) {
-        // console.log("[LiveAPI] Text response:", part.text);
       }
     }
   }
@@ -460,24 +455,25 @@ export class GeminiLiveAPI {
    * previous one on the audio timeline — no queue or onended callbacks needed.
    */
   private playAudioChunk(base64Data: string) {
-    if (!this.playbackContext) {
-      console.error("[LiveAPI] No playbackContext!");
-      return;
-    }
+    if (!this.playbackContext) return;
 
     // Resume if suspended (iOS Safari blocks audio until user gesture completes)
     if (this.playbackContext.state === 'suspended') {
-      console.warn("[LiveAPI] Resuming suspended playbackContext...");
       this.playbackContext.resume();
     }
 
     const binaryString = atob(base64Data);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+    const len = binaryString.length;
+    const float32 = new Float32Array(len / 2);
 
-    const int16 = new Int16Array(bytes.buffer);
-    const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+    for (let i = 0; i < float32.length; i++) {
+      // Reconstruct Little-Endian Int16 from two bytes
+      const byte1 = binaryString.charCodeAt(i * 2);
+      const byte2 = binaryString.charCodeAt(i * 2 + 1);
+      let int16 = (byte2 << 8) | byte1;
+      if (int16 >= 0x8000) int16 -= 0x10000; // Sign extension
+      float32[i] = int16 / 32768.0;
+    }
 
     const audioBuffer = this.playbackContext.createBuffer(1, float32.length, 24000);
     audioBuffer.copyToChannel(float32, 0);
@@ -486,17 +482,25 @@ export class GeminiLiveAPI {
     source.buffer = audioBuffer;
     source.connect(this.playbackContext.destination);
 
+    // Track active sources for barge-in (interruption) support
+    this.activeSources.push(source);
+    source.onended = () => {
+      // Use splice+indexOf instead of filter to avoid allocating a new array per chunk
+      const idx = this.activeSources.indexOf(source);
+      if (idx !== -1) this.activeSources.splice(idx, 1);
+    };
+
     // Schedule each chunk immediately after the last — ensures gapless playback
     const now = this.playbackContext.currentTime;
     const startAt = Math.max(this.nextPlayTime, now);
     source.start(startAt);
     this.nextPlayTime = startAt + audioBuffer.duration;
-
-    // console.debug(`[LiveAPI] Scheduled ${(audioBuffer.duration * 1000).toFixed(0)}ms audio chunk @ t=${startAt.toFixed(3)}`);
   }
 
-  // Send a tool call response back to Gemini to complete the function calling loop.
-  // IMPORTANT: response must be { result: value } per the SDK contract — not the value directly.
+  /**
+   * Sends a tool call response back to Gemini to complete the function calling loop.
+   * IMPORTANT: response must be { result: value } per the SDK contract.
+   */
   public sendToolResponse(id: string, name: string, result: Record<string, any>) {
     if (!this.session) {
       console.error("[LiveAPI] Cannot send tool response — no active session.");
@@ -509,14 +513,12 @@ export class GeminiLiveAPI {
           id,
           name,
           response: {
-            // SDK requires result to be wrapped in { result: ... }
             result,
-            // INTERRUPT: model interrupts to acknowledge the tool completed
             scheduling: FunctionResponseScheduling.INTERRUPT,
           }
         }]
       };
-      console.log(`[LiveAPI] → sendToolResponse for "${name}" (id: ${id}):`, JSON.stringify(payload));
+      console.log(`[LiveAPI] → sendToolResponse for "${name}" (id: ${id})`);
       this.session.sendToolResponse(payload);
       this.onAgentStatusChange('connected');
     } catch (e) {
@@ -527,8 +529,8 @@ export class GeminiLiveAPI {
   }
 
   /**
-   * Sends text or other non-audio content turns to the AI in real-time.
-   * Useful for updating the model's current "short term memory" with context like a learning plan.
+   * Sends text content turns to the AI in real-time.
+   * Useful for updating the model's context (e.g., learning plan summaries).
    */
   public sendClientContent(content: string) {
     if (!this.session) {
@@ -536,7 +538,7 @@ export class GeminiLiveAPI {
       return;
     }
     try {
-      console.log("[LiveAPI] → sendClientContent:", content);
+      console.log("[LiveAPI] → sendClientContent:", content.slice(0, 80) + (content.length > 80 ? '…' : ''));
       this.session.sendClientContent({
         turns: [{
           role: 'user',
@@ -548,10 +550,14 @@ export class GeminiLiveAPI {
     }
   }
 
-  // Expects base64 encoded jpeg or webp
+  /** Sends a base64-encoded JPEG or WebP frame as a video input. */
   public sendVideoFrame(base64Frame: string, mimeType = 'image/jpeg') {
-    if (!this.session || this.toolCallPending) return;
+    if (!this.session) {
+      console.warn('[LiveAPI] sendVideoFrame skip: No session');
+      return;
+    }
     try {
+      console.log(`[LiveAPI] → sendRealtimeInput: video frame (${mimeType}, ${Math.round(base64Frame.length / 1024)} KB)`);
       this.session.sendRealtimeInput({
         video: { data: base64Frame, mimeType: mimeType }
       });
@@ -567,11 +573,8 @@ export class GeminiLiveAPI {
 
   private handleWsClose(event?: any) {
     this.session = null;
-
-    // Auto-reconnect logic
     const code = event?.code;
 
-    // We reconnect unless the user manually disconnected or we hit the retry limit
     if (!this.isUserInitiatedDisconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
       this.reconnectAttempts++;
       this.isReconnecting = true;
@@ -622,6 +625,7 @@ export class GeminiLiveAPI {
       this.playbackContext = null;
     }
     this.nextPlayTime = 0;
+    this.activeSources = [];
     this.onStateChange('disconnected');
     this.onAgentStatusChange('disconnected');
   }
