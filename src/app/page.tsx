@@ -27,7 +27,6 @@ const TldrawInner = memo(function TldrawInner({
   onEquationRef,
   onDiagramRef,
   onChartRef,
-  onImageRef,
   onResetPrinthead,
 }: {
   isConnected: boolean;
@@ -35,7 +34,6 @@ const TldrawInner = memo(function TldrawInner({
   onEquationRef: React.MutableRefObject<((latex: string, label?: string, id?: string) => Promise<void>) | null>;
   onDiagramRef: React.MutableRefObject<((code: string, id?: string) => Promise<void>) | null>;
   onChartRef: React.MutableRefObject<((config: any, id?: string) => Promise<void>) | null>;
-  onImageRef: React.MutableRefObject<((url: string, w: number, h: number, id?: string) => Promise<void>) | null>;
   onResetPrinthead: React.MutableRefObject<(() => void) | null>;
 }) {
   const editor = useEditor();
@@ -118,22 +116,7 @@ const TldrawInner = memo(function TldrawInner({
       editor.createShape({ id: shapeId, type: 'chart', x, y, props: { config, w: 400, h: 300 } });
       finalizeSpawn(shapeId, 300);
     };
-
-    onImageRef.current = async (url, w, h, id) => {
-      if (id && processedCallsRef.current.has(id)) return;
-      if (id) processedCallsRef.current.add(id);
-      const { x, y } = getSpawnPosition(w, h);
-      const assetId = AssetRecordType.createId();
-      editor.createAssets([{
-        id: assetId, type: 'image', typeName: 'asset',
-        props: { w, h, name: 'ai-fetched-diagram', isAnimated: false, mimeType: 'image/jpeg', src: url },
-        meta: {},
-      }]);
-      const shapeId = createShapeId();
-      editor.createShape({ id: shapeId, type: 'image', x, y, props: { assetId, w, h } });
-      finalizeSpawn(shapeId, h);
-    };
-  }, [editor, onEquationRef, onDiagramRef, onChartRef, onImageRef, getSpawnPosition, finalizeSpawn]);
+  }, [editor, onEquationRef, onDiagramRef, onChartRef, getSpawnPosition, finalizeSpawn]);
 
   // ── Change-driven, idle-time screenshot capture ──────────────────────────
   //
@@ -336,7 +319,6 @@ export default function App() {
   const onEquationRef = useRef<((latex: string, label?: string, id?: string) => Promise<void>) | null>(null);
   const onDiagramRef = useRef<((code: string, id?: string) => Promise<void>) | null>(null);
   const onChartRef = useRef<((config: any, id?: string) => Promise<void>) | null>(null);
-  const onImageRef = useRef<((url: string, w: number, h: number, id?: string) => Promise<void>) | null>(null);
   const onResetPrintheadRef = useRef<(() => void) | null>(null);
 
   // Learning Plan state
@@ -430,7 +412,6 @@ export default function App() {
       onEquationRef,
       onDiagramRef,
       onChartRef,
-      onImageRef,
     });
 
     setErrorMsg('');
@@ -557,7 +538,6 @@ export default function App() {
                 onEquationRef={onEquationRef}
                 onDiagramRef={onDiagramRef}
                 onChartRef={onChartRef}
-                onImageRef={onImageRef}
                 onResetPrinthead={onResetPrintheadRef}
               />
             </Tldraw>
@@ -626,9 +606,20 @@ export default function App() {
                           <span className="font-bold uppercase text-[9px]">Outcome:</span> {topic.learning_outcome}
                         </div>
                       )}
-                      {topic.exercises && (
+                      {topic.exercises && topic.exercises.length > 0 && (
                         <div className="mt-2 text-[11px] text-amber-700 bg-amber-50 px-2 py-1 rounded border border-amber-100">
-                          <span className="font-bold uppercase text-[9px]">Practice:</span> {topic.exercises}
+                          <span className="font-bold uppercase text-[9px]">Practice:</span>
+                          <ul className="list-disc ml-3 mt-1 space-y-0.5">
+                            {topic.exercises.map((ex, i) => <li key={i}>{ex}</li>)}
+                          </ul>
+                        </div>
+                      )}
+                      {topic.examples && topic.examples.length > 0 && (
+                        <div className="mt-2 text-[11px] text-zinc-700 bg-zinc-100 px-2 py-1 rounded border border-zinc-200">
+                          <span className="font-bold uppercase text-[9px]">Examples:</span>
+                          <ul className="list-disc ml-3 mt-1 space-y-0.5">
+                            {topic.examples.map((ex, i) => <li key={i}>{ex}</li>)}
+                          </ul>
                         </div>
                       )}
                       {topic.flow && (

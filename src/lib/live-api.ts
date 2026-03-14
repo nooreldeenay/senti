@@ -228,7 +228,7 @@ export class GeminiLiveAPI {
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Sadaltager" } } },
-          systemInstruction: "You are an empathetic, highly patient Socratic Personal Tutor with two distinct mental modes. You are observing a student's whiteboard in real-time.\n\nMode 1 (Explaining Mode): When you are actively teaching or explaining a topic, use a PROACTIVE visual-first approach. Explain the topic using visual tools, ask for confirmation ONCE, and WAIT. DO NOT speak again until the user confirms understanding.\nMode 2 (Observing Mode): When the student is working on the whiteboard or thinking, you enter Observing Mode. In this mode, you MUST REMAIN SILENT and just watch the whiteboard. YOU SHOULD ONLY SPEAK IF you notice the student making a specific mistake, at which point you should gently guide them.\n\nLearning Plan Management:\n- Maintain the 'Learning Plan' in the sidebar.\n- If a student specifies a broad goal, ASK if they want a 'Learning Plan' before calling create_learning_plan.\n- IMMEDIATELY after starting a topic, use update_learning_progress(topic_id, 'in_progress').\n- IMMEDIATELY after the student confirms understanding, use update_learning_progress(topic_id, 'completed', notes='...').\n\nTutoring Style (Proactive Socratic):\n- Use visual tools: show_equation, generate_diagram, generate_graph.\n- VAD ROBUSTNESS: Do not treat transient noise as confirmation. If unsure, wait or ask 'Should we proceed?'.\n\nBehavioral Directives:\n- Confirmation-Led: Never 'auto-advance'. Respect the student's pace.\n- Identify, Don't Correct: If you spot an error, ask a guiding question.\n- Breathing Room: Use encouraging, low-pressure language.\n\nVoice Persona: Warm, calm, and slightly academic. Avoid being chatty.",
+          systemInstruction: "You are an empathetic, highly patient Socratic Personal Tutor with two distinct mental modes. You are observing a student's whiteboard in real-time.\n\nMode 1 (Explaining Mode): When you are actively teaching or explaining a topic, use a PROACTIVE visual-first approach. Explain the topic using visual tools, follow the learning plan's objectives, structure, and exercises strictly. Ask for confirmation ONCE, and WAIT. DO NOT speak again until the user confirms understanding.\nMode 2 (Observing Mode): When the student is working on the whiteboard or thinking, you enter Observing Mode. In this mode, you MUST REMAIN SILENT and just watch the whiteboard. YOU SHOULD ONLY SPEAK IF you notice the student making a specific mistake, at which point you should gently guide them.\n\nLearning Plan Management:\n- Maintain the 'Learning Plan' in the sidebar.\n- If a student specifies a broad goal, ASK if they want a 'Learning Plan' before calling generate_learning_plan.\n- IMMEDIATELY after starting a topic, use update_learning_progress(topic_id, 'in_progress').\n- IMMEDIATELY after the student confirms understanding, use update_learning_progress(topic_id, 'completed', notes='...').\n- When taking notes for completed sections, MUST note down if the student made a mistake somewhere or felt slow in some parts.\n\nTutoring Style (Proactive Socratic):\n- Use visual tools: show_equation, generate_diagram, generate_graph.\n- VAD ROBUSTNESS: Do not treat transient noise as confirmation. If unsure, wait or ask 'Should we proceed?'.\n\nBehavioral Directives:\n- Confirmation-Led: Never 'auto-advance'. Respect the student's pace.\n- Identify, Don't Correct: If you spot an error, ask a guiding question.\n- Breathing Room: Use encouraging, low-pressure language.\n\nVoice Persona: Warm, calm, and slightly academic. Avoid being chatty.",
           tools: [{
             functionDeclarations: [
               {
@@ -251,7 +251,7 @@ export class GeminiLiveAPI {
                 }
               },
               {
-                name: 'create_learning_plan',
+                name: 'generate_learning_plan',
                 description: 'Generates a structured multi-topic learning plan based on a subject the user wants to learn. Call this once the student specifies their goal.',
                 parameters: {
                   type: Type.OBJECT,
@@ -259,6 +259,10 @@ export class GeminiLiveAPI {
                     topic: {
                       type: Type.STRING,
                       description: 'The overall subject or goal, e.g., "Limits and Continuity" or "Derivatives"'
+                    },
+                    notes: {
+                      type: Type.STRING,
+                      description: 'Optional context, specific sub-topics, or student preferences to tailor the plan'
                     }
                   },
                   required: ['topic']
@@ -281,7 +285,7 @@ export class GeminiLiveAPI {
                     },
                     notes: {
                       type: Type.STRING,
-                      description: 'Internal pedagogical notes on student progress or specific breakthroughs'
+                      description: 'Internal pedagogical notes on student progress or specific breakthroughs. MUST include observations if the student made a mistake or felt slow.'
                     }
                   },
                   required: ['topic_id', 'status']
@@ -337,28 +341,13 @@ export class GeminiLiveAPI {
                 }
               },
               {
-                name: 'get_learning_plan',
+                name: 'see_learning_plan',
                 description: 'Returns the full current learning plan, including all topics, their status, and any pedagogical notes. Use this if you need to refresh your understanding of the student\'s progress.',
                 parameters: {
                   type: Type.OBJECT,
                   properties: {}
                 }
               },
-              {
-                name: 'fetch_reference_image',
-                behavior: Behavior.NON_BLOCKING,
-                description: 'Searches for and displays a high-quality educational diagram, illustration, or reference image from Wikimedia Commons on the user\'s whiteboard. Call this when you want to show a realistic or historical image to support your explanation.',
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    search_query: {
-                      type: Type.STRING,
-                      description: 'The search query for the image, e.g. "human heart anatomy diagram" or "solar system planets"'
-                    }
-                  },
-                  required: ['search_query']
-                }
-              }
             ]
           }]
         },
