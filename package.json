@@ -10,9 +10,13 @@
   },
   "dependencies": {
     "@google/genai": "^1.42.0",
+    "@google/generative-ai": "^0.24.1",
     "@types/katex": "^0.16.8",
+    "d3": "^7.9.0",
+    "function-plot": "^1.25.3",
     "html-to-image": "^1.11.13",
     "katex": "^0.16.38",
+    "mermaid": "^11.13.0",
     "next": "16.1.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",

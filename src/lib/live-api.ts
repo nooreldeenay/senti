@@ -7,7 +7,7 @@ export class GeminiLiveAPI {
   private playbackContext: AudioContext | null = null;
   private audioStream: MediaStream | null = null;
   private processorNode: AudioWorkletNode | ScriptProcessorNode | null = null;
-  private currentModel = 'gemini-2.5-flash-native-audio-preview-12-2025';
+  private currentModel = 'gemini-2.5-flash-native-audio-preview-09-2025';
 
   // Callbacks
   public onStateChange: (state: 'disconnected' | 'connecting' | 'connected' | 'error', errorMsg?: string) => void = () => { };
@@ -15,6 +15,15 @@ export class GeminiLiveAPI {
   public onVolumeChange: (volume: number) => void = () => { };
   // Called when Gemini invokes a function tool. Handler must call sendToolResponse when done.
   public onToolCall: (name: string, args: Record<string, any>, id: string) => void = () => { };
+  public onAgentStatusChange: (status: 'disconnected' | 'connected' | 'speaking' | 'thinking') => void = () => { };
+
+  // Reconnection state
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private isReconnecting = false;
+  private reconnectTimeout: any = null;
+  private isUserInitiatedDisconnect = false;
+  private toolCallPending = false;
 
   // Gapless playback — we schedule each chunk ahead using Web Audio time
   private nextPlayTime = 0;
@@ -22,6 +31,9 @@ export class GeminiLiveAPI {
   // Settings
   private audioDeviceId?: string;
   private isMuted: boolean = false;
+  private noiseThreshold: number = 0.0015; // RMS threshold (~ -56dB)
+  private framesBelowThreshold: number = 0;
+  private readonly GATE_CLOSURE_MS = 500; // How long to wait before closing gate
 
   constructor() { }
 
@@ -68,12 +80,30 @@ export class GeminiLiveAPI {
 
   // Sends a PCM Int16Array as base64 audio to Gemini
   private sendPcmChunk(pcmData: Int16Array) {
-    if (!this.session || this.isMuted) return;
+    if (!this.session || this.isMuted || this.toolCallPending) return;
 
-    // Volume feedback
-    let sum = 0;
-    for (let i = 0; i < pcmData.length; i++) sum += Math.abs(pcmData[i]);
-    this.onVolumeChange(sum / pcmData.length);
+    // Volume feedback & Noise Gate
+    let sumSquares = 0;
+    for (let i = 0; i < pcmData.length; i++) {
+      const normalized = pcmData[i] / 32768.0;
+      sumSquares += normalized * normalized;
+    }
+    const rms = Math.sqrt(sumSquares / pcmData.length);
+    this.onVolumeChange(rms * 100); // Scale for UI feedback
+
+    // Noise gate logic
+    if (rms < this.noiseThreshold) {
+      this.framesBelowThreshold++;
+      const msBelow = (this.framesBelowThreshold * 2048) / 16000 * 1000;
+      if (msBelow > this.GATE_CLOSURE_MS) {
+        // Gate is closed — skip sending
+        return;
+      }
+    } else {
+      this.framesBelowThreshold = 0;
+    }
+
+    console.debug(`[LiveAPI] RMS: ${rms.toFixed(5)} (Threshold: ${this.noiseThreshold})`);
 
     // Encode to base64
     const bytes = new Uint8Array(pcmData.buffer);
@@ -161,6 +191,7 @@ export class GeminiLiveAPI {
 
   public async connect() {
     console.log("[LiveAPI] Initiating connection sequence...");
+    this.isUserInitiatedDisconnect = false;
     this.onStateChange('connecting');
     try {
       // Check mediaDevices availability (requires HTTPS on non-localhost)
@@ -189,34 +220,146 @@ export class GeminiLiveAPI {
         config: {
           // responseModalities must be at the top level of config (not generationConfig)
           responseModalities: [Modality.AUDIO],
-          systemInstruction: "You are an empathetic, highly patient Socratic Math Tutor. You are observing a student's whiteboard in real-time. Your goal is to guide them without rushing or providing direct answers.\n\nBehavioral Directives:\n\n- The 'Silence is Golden' Rule: When you see the student drawing or writing, do not interrupt. Allow them to finish their thought. Only speak if they pause for more than 5 seconds or if they ask a direct question.\n\n- Identify, Don't Correct: If you spot a mathematical error (e.g., a sign error or a calculation mistake), do not say 'That is wrong.' Instead, ask a guiding question like: 'I noticed a change in the second step; does that negative sign carry over?'\n\n- The 'Breathing Room' Protocol: Use encouraging, low-pressure language. If the student seems frustrated, say: 'Take your time, I'm just here to support you. There's no rush.'\n\n- Proactive Visuals: Whenever you want to show or reference any mathematical equation, formula, or expression, ALWAYS call the show_equation tool to render it visually on the whiteboard. Never describe math verbally without also showing it. If the student is struggling to visualize a concept, use show_equation to provide a visual scaffold.\n\nVoice Persona: Your voice should be warm, calm, and slightly academic but accessible. Avoid being 'chatty'—stay focused on the work while being human.",
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Sadaltager" } } },
+          systemInstruction: "You are an empathetic, highly patient Socratic Personal Tutor with two distinct mental modes. You are observing a student's whiteboard in real-time.\n\nMode 1 (Explaining Mode): When you are actively teaching or explaining a topic, use a PROACTIVE visual-first approach. Explain the topic using visual tools, ask for confirmation ONCE, and WAIT. DO NOT speak again until the user confirms understanding.\nMode 2 (Observing Mode): When the student is working on the whiteboard or thinking, you enter Observing Mode. In this mode, you MUST REMAIN SILENT and just watch the whiteboard. YOU SHOULD ONLY SPEAK IF you notice the student making a specific mistake, at which point you should gently guide them.\n\nLearning Plan Management:\n- Maintain the 'Learning Plan' in the sidebar.\n- If a student specifies a broad goal, ASK if they want a 'Learning Plan' before calling create_learning_plan.\n- IMMEDIATELY after starting a topic, use update_learning_progress(topic_id, 'in_progress').\n- IMMEDIATELY after the student confirms understanding, use update_learning_progress(topic_id, 'completed', notes='...').\n\nTutoring Style (Proactive Socratic):\n- Use visual tools: show_equation, generate_diagram, generate_graph.\n- VAD ROBUSTNESS: Do not treat transient noise as confirmation. If unsure, wait or ask 'Should we proceed?'.\n\nBehavioral Directives:\n- Confirmation-Led: Never 'auto-advance'. Respect the student's pace.\n- Identify, Don't Correct: If you spot an error, ask a guiding question.\n- Breathing Room: Use encouraging, low-pressure language.\n\nVoice Persona: Warm, calm, and slightly academic. Avoid being chatty.",
           tools: [{
-            functionDeclarations: [{
-              name: 'show_equation',
-              // NON_BLOCKING: model doesn't wait for our response before continuing to speak.
-              // Without this, the callback-based async flow creates a deadlock.
-              behavior: Behavior.NON_BLOCKING,
-              description: 'Renders a LaTeX math equation visually on the user\'s whiteboard canvas. Always call this when you want to display any mathematical formula, equation, or expression.',
-              parameters: {
-                type: Type.OBJECT,
-                properties: {
-                  latex: {
-                    type: Type.STRING,
-                    description: 'Valid LaTeX string for the equation, e.g. "\\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}"'
+            functionDeclarations: [
+              {
+                name: 'show_equation',
+                behavior: Behavior.NON_BLOCKING,
+                description: 'Renders a LaTeX math equation visually on the user\'s whiteboard canvas. Always call this when you want to display any mathematical formula, equation, or expression.',
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    latex: {
+                      type: Type.STRING,
+                      description: 'Valid LaTeX string for the equation, e.g. "\\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}"'
+                    },
+                    label: {
+                      type: Type.STRING,
+                      description: 'Short title or label for the equation, e.g. "Quadratic Formula"'
+                    }
                   },
-                  label: {
-                    type: Type.STRING,
-                    description: 'Short title or label for the equation, e.g. "Quadratic Formula"'
-                  }
-                },
-                required: ['latex']
+                  required: ['latex']
+                }
+              },
+              {
+                name: 'create_learning_plan',
+                description: 'Generates a structured multi-topic learning plan based on a subject the user wants to learn. Call this once the student specifies their goal.',
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    topic: {
+                      type: Type.STRING,
+                      description: 'The overall subject or goal, e.g., "Limits and Continuity" or "Derivatives"'
+                    }
+                  },
+                  required: ['topic']
+                }
+              },
+              {
+                name: 'update_learning_progress',
+                description: 'Updates the status and adds pedagogical notes to a specific topic in the current learning plan.',
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    topic_id: {
+                      type: Type.STRING,
+                      description: 'The unique ID of the topic from the learning plan'
+                    },
+                    status: {
+                      type: Type.STRING,
+                      enum: ['not_started', 'in_progress', 'completed'],
+                      description: 'The new status for this topic'
+                    },
+                    notes: {
+                      type: Type.STRING,
+                      description: 'Internal pedagogical notes on student progress or specific breakthroughs'
+                    }
+                  },
+                  required: ['topic_id', 'status']
+                }
+              },
+              {
+                name: 'generate_diagram',
+                behavior: Behavior.NON_BLOCKING,
+                description: 'Renders a flowchart, sequence diagram, or other visual aid using Mermaid.js syntax. Use this for logical systems or process explanations. IMPORTANT: Return ONLY the raw mermaid code (e.g., "graph TD; A-->B;"), do NOT wrap it in markdown block quotes like ```mermaid.',
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    code: {
+                      type: Type.STRING,
+                      description: 'The raw Mermaid.js code, e.g., "graph TD\\n A-->B;". NO markdown code blocks, do not start with "```mermaid". Just the raw syntax.'
+                    }
+                  },
+                  required: ['code']
+                }
+              },
+              {
+                name: 'generate_graph',
+                behavior: Behavior.NON_BLOCKING,
+                description: 'Plots mathematical functions or charts using function-plot. Call this to show graphs of functions, derivatives, or data points.',
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING, description: 'Title of the chart' },
+                    data: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          fn: { type: Type.STRING, description: 'The function to plot, e.g., "x^2" or "sin(x)"' },
+                          color: { type: Type.STRING, description: 'Optional color for the line' },
+                          desc: { type: Type.STRING, description: 'Legend description' }
+                        },
+                        required: ['fn']
+                      }
+                    },
+                    xRange: {
+                      type: Type.ARRAY,
+                      items: { type: Type.NUMBER },
+                      description: 'Range for X axis, e.g., [-10, 10]'
+                    },
+                    yRange: {
+                      type: Type.ARRAY,
+                      items: { type: Type.NUMBER },
+                      description: 'Range for Y axis, e.g., [-10, 10]'
+                    }
+                  },
+                  required: ['data']
+                }
+              },
+              {
+                name: 'get_learning_plan',
+                description: 'Returns the full current learning plan, including all topics, their status, and any pedagogical notes. Use this if you need to refresh your understanding of the student\'s progress.',
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {}
+                }
+              },
+              {
+                name: 'fetch_reference_image',
+                behavior: Behavior.NON_BLOCKING,
+                description: 'Searches for and displays a high-quality educational diagram, illustration, or reference image from Wikimedia Commons on the user\'s whiteboard. Call this when you want to show a realistic or historical image to support your explanation.',
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    search_query: {
+                      type: Type.STRING,
+                      description: 'The search query for the image, e.g. "human heart anatomy diagram" or "solar system planets"'
+                    }
+                  },
+                  required: ['search_query']
+                }
               }
-            }]
+            ]
           }]
         },
         callbacks: {
           onopen: () => {
             console.log("[LiveAPI] Session Opened");
+            this.reconnectAttempts = 0;
+            this.isReconnecting = false;
             this.handleWsOpen();
           },
           onmessage: (response: any) => {
@@ -228,7 +371,7 @@ export class GeminiLiveAPI {
           },
           onclose: (e: any) => {
             console.log("[LiveAPI] Session Closed", e);
-            this.handleWsClose();
+            this.handleWsClose(e);
           }
         }
       });
@@ -242,11 +385,13 @@ export class GeminiLiveAPI {
   private handleWsOpen() {
     this.nextPlayTime = 0;
     this.onStateChange('connected');
+    this.onAgentStatusChange('connected');
+  }
 
+  private sendHandshakeMessage() {
     // Anchor the model to your tools before streaming audio
-    this.session?.sendClientContent({
-      turns: "Acknowledge my system instructions. I will speak to you now."
-    });
+    // This ensures subsequent turns are part of a stable session context
+    // Removed per user request to not send initial handshake text
   }
 
   private handleWsMessage(response: any) {
@@ -269,10 +414,19 @@ export class GeminiLiveAPI {
 
     // Handle tool calls
     if (response.toolCall?.functionCalls?.length) {
+      this.toolCallPending = true;
+      this.onAgentStatusChange('thinking');
       console.log(`[LiveAPI] Tool call received: ${response.toolCall.functionCalls.map((f: any) => f.name).join(', ')}`);
       for (const fc of response.toolCall.functionCalls) {
         this.onToolCall(fc.name, fc.args ?? {}, fc.id);
       }
+      return;
+    }
+
+    // Handle setup complete
+    if (response.setupComplete) {
+      console.log("[LiveAPI] Setup Complete");
+      this.sendHandshakeMessage();
       return;
     }
 
@@ -282,12 +436,17 @@ export class GeminiLiveAPI {
       return;
     }
 
+    if (content.turnComplete) {
+      this.onAgentStatusChange('connected'); // meaning idle/listening
+    }
+
     const parts = content?.modelTurn?.parts;
     if (!parts?.length) return;
 
     for (const part of parts) {
       if (part.inlineData?.data) {
         // console.debug(`[LiveAPI] Audio chunk: ${part.inlineData.mimeType}, ${part.inlineData.data.length} chars`);
+        this.onAgentStatusChange('speaking');
         this.playAudioChunk(part.inlineData.data);
       } else if (part.text) {
         // console.log("[LiveAPI] Text response:", part.text);
@@ -341,6 +500,7 @@ export class GeminiLiveAPI {
   public sendToolResponse(id: string, name: string, result: Record<string, any>) {
     if (!this.session) {
       console.error("[LiveAPI] Cannot send tool response — no active session.");
+      this.toolCallPending = false;
       return;
     }
     try {
@@ -358,14 +518,39 @@ export class GeminiLiveAPI {
       };
       console.log(`[LiveAPI] → sendToolResponse for "${name}" (id: ${id}):`, JSON.stringify(payload));
       this.session.sendToolResponse(payload);
+      this.onAgentStatusChange('connected');
     } catch (e) {
       console.error("[LiveAPI] Failed to send tool response:", e);
+    } finally {
+      this.toolCallPending = false;
+    }
+  }
+
+  /**
+   * Sends text or other non-audio content turns to the AI in real-time.
+   * Useful for updating the model's current "short term memory" with context like a learning plan.
+   */
+  public sendClientContent(content: string) {
+    if (!this.session) {
+      console.error("[LiveAPI] Cannot send client content — no active session.");
+      return;
+    }
+    try {
+      console.log("[LiveAPI] → sendClientContent:", content);
+      this.session.sendClientContent({
+        turns: [{
+          role: 'user',
+          parts: [{ text: content }]
+        }]
+      });
+    } catch (e) {
+      console.error("[LiveAPI] Failed to send client content:", e);
     }
   }
 
   // Expects base64 encoded jpeg or webp
   public sendVideoFrame(base64Frame: string, mimeType = 'image/jpeg') {
-    if (!this.session) return;
+    if (!this.session || this.toolCallPending) return;
     try {
       this.session.sendRealtimeInput({
         video: { data: base64Frame, mimeType: mimeType }
@@ -380,13 +565,42 @@ export class GeminiLiveAPI {
     this.onStateChange('error', 'Connection error occurred');
   }
 
-  private handleWsClose() {
-    this.onStateChange('disconnected');
-    this.disconnect();
+  private handleWsClose(event?: any) {
+    this.session = null;
+
+    // Auto-reconnect logic
+    const code = event?.code;
+
+    // We reconnect unless the user manually disconnected or we hit the retry limit
+    if (!this.isUserInitiatedDisconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+      this.isReconnecting = true;
+      this.onStateChange('connecting', `Connection lost (code ${code}). Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+
+      const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 10000);
+      console.log(`[LiveAPI] Reconnecting in ${delay}ms...`);
+
+      if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = setTimeout(() => {
+        this.connect();
+      }, delay);
+    } else {
+      this.onStateChange('disconnected');
+      this.disconnect();
+    }
   }
 
   public disconnect() {
     console.log("[LiveAPI] Disconnecting...");
+    this.isUserInitiatedDisconnect = true;
+
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+    this.reconnectAttempts = 0;
+    this.isReconnecting = false;
+
     if (this.session) {
       if (typeof this.session.close === 'function') this.session.close();
       this.session = null;
@@ -409,5 +623,6 @@ export class GeminiLiveAPI {
     }
     this.nextPlayTime = 0;
     this.onStateChange('disconnected');
+    this.onAgentStatusChange('disconnected');
   }
 }
