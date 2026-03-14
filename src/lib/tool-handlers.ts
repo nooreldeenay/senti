@@ -8,6 +8,7 @@
  */
 
 import mermaid from 'mermaid';
+import katex from 'katex';
 import { GeminiLiveAPI } from './live-api';
 
 export interface LearningTopic {
@@ -24,13 +25,14 @@ export interface LearningTopic {
 
 export interface ToolHandlerDeps {
   liveApi: GeminiLiveAPI;
-  plan: LearningTopic[];
+  planRef: React.MutableRefObject<LearningTopic[]>;
   setPlan: React.Dispatch<React.SetStateAction<LearningTopic[]>>;
   setIsGeneratingPlan: (v: boolean) => void;
   setSidebarTopic: (v: string) => void;
   setIsSpawning: (v: boolean) => void;
   spawnTimerRef: React.MutableRefObject<ReturnType<typeof setTimeout> | null>;
   addNotification: (msg: string, type?: 'info' | 'error' | 'success') => void;
+  sidebarTopicRef: React.MutableRefObject<string>;
   onEquationRef: React.MutableRefObject<((latex: string, label?: string, id?: string) => Promise<void>) | null>;
   onDiagramRef: React.MutableRefObject<((code: string, id?: string) => Promise<void>) | null>;
   onChartRef: React.MutableRefObject<((config: any, id?: string) => Promise<void>) | null>;
@@ -39,8 +41,8 @@ export interface ToolHandlerDeps {
 export function createToolHandler(deps: ToolHandlerDeps) {
   return async function handleToolCall(name: string, args: any, id: string) {
     const {
-      liveApi, plan, setPlan, setIsGeneratingPlan, setSidebarTopic,
-      setIsSpawning, spawnTimerRef, addNotification,
+      liveApi, planRef, setPlan, setIsGeneratingPlan, setSidebarTopic,
+      setIsSpawning, spawnTimerRef, addNotification, sidebarTopicRef,
       onEquationRef, onDiagramRef, onChartRef
     } = deps;
 
@@ -60,13 +62,20 @@ export function createToolHandler(deps: ToolHandlerDeps) {
     if (name === 'show_equation') {
       const { latex, label } = args as { latex: string; label?: string };
       try {
+        // Validate LaTeX syntax using KaTeX before sending to the UI
+        katex.renderToString(latex, { throwOnError: true });
+        
         await onEquationRef.current?.(latex, label, id);
         liveApi.sendToolResponse(id, name, {
           success: true,
-          message: `Equation rendered on the whiteboard${label ? `: ${label}` : ''}.`,
+          message: `Equation state: Rendered visually on the whiteboard${label ? ` as "${label}"` : ''}. Wait for student confirmation.`,
         });
       } catch (e: any) {
-        liveApi.sendToolResponse(id, name, { success: false, error: e?.message ?? 'Failed to render equation' });
+        console.error(`[Tool] LaTeX validation failed for: ${latex}`, e);
+        liveApi.sendToolResponse(id, name, { 
+          success: false, 
+          error: `Invalid LaTeX syntax: ${e?.message || 'Check your formatting'}. Please correct the LaTeX code and try show_equation again.` 
+        });
       }
 
     // -----------------------------------------------------------------------
@@ -147,28 +156,54 @@ export function createToolHandler(deps: ToolHandlerDeps) {
     } else if (name === 'see_learning_plan' || name === 'get_learning_plan') {
       liveApi.sendToolResponse(id, name, {
         success: true,
-        plan,
-        message: `Current learning plan retrieved. Total topics: ${plan.length}.`,
+        plan: planRef.current,
+        message: `Current learning plan retrieved. Total topics: ${planRef.current.length}.`,
       });
 
     // -----------------------------------------------------------------------
     // Tool: update_learning_progress
     // -----------------------------------------------------------------------
     } else if (name === 'update_learning_progress') {
-      const { topic_id, status, notes } = args as {
-        topic_id: string;
-        status: 'not_started' | 'in_progress' | 'completed';
-        notes?: string;
-      };
-      setPlan(prev => prev.map(t =>
-        t.id === topic_id || t.title === topic_id
-          ? { ...t, status, notes: notes ?? t.notes }
-          : t
+      const { topic_id, status, notes } = args as { topic_id: string; status: string; notes?: string };
+      
+      setPlan(prev => prev.map(topic => 
+        topic.id === topic_id ? { ...topic, status: status as any, notes: notes || topic.notes } : topic
       ));
+
       liveApi.sendToolResponse(id, name, {
         success: true,
-        message: `Topic "${topic_id}" is now ${status}. Notes updated: ${notes ? 'yes' : 'no'}.`,
+        message: `Progress updated: Topic "${topic_id}" status is now "${status}". Sidebar updated. Wait for user command to proceed.`,
       });
+    
+    // -----------------------------------------------------------------------
+    // Tool: save_learning_progress
+    // -----------------------------------------------------------------------
+    } else if (name === 'save_learning_progress') {
+      try {
+        const currentTopic = planRef.current.find(t => t.status === 'in_progress');
+        const res = await fetch('/api/sessions/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            topic: sidebarTopicRef.current,
+            plan: planRef.current,
+            currentTopicId: currentTopic?.id || null,
+          }),
+        });
+
+        if (!res.ok) throw new Error('Failed to save session');
+        
+        const data = await res.json();
+        addNotification('Learning progress saved to cloud!', 'success');
+        liveApi.sendToolResponse(id, name, {
+          success: true,
+          message: 'Session progress has been securely saved to Firestore. You can safely leave now.',
+          sessionId: data.id
+        });
+      } catch (err: any) {
+        console.error('[Tool] Save failed:', err);
+        liveApi.sendToolResponse(id, name, { success: false, error: err.message });
+      }
 
     // -----------------------------------------------------------------------
     // Unknown tool

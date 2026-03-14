@@ -326,6 +326,57 @@ export default function App() {
   const [isGeneratingPlan, setIsGeneratingPlan] = useState(false);
   const [sidebarTopic, setSidebarTopic] = useState('');
 
+  // Session History
+  const [pastSessions, setPastSessions] = useState<any[]>([]);
+  const [isFetchingSessions, setIsFetchingSessions] = useState(false);
+
+  const fetchSessions = useCallback(async () => {
+    setIsFetchingSessions(true);
+    try {
+      const res = await fetch('/api/sessions/list');
+      const data = await res.json();
+      if (data.sessions) setPastSessions(data.sessions);
+    } catch (err) {
+      console.error('[Sessions] Failed to fetch:', err);
+    } finally {
+      setIsFetchingSessions(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSessions();
+  }, [fetchSessions]);
+
+  // Refs for tool handlers to avoid stale closures
+  const planRef = useRef(plan);
+  const sidebarTopicRef = useRef(sidebarTopic);
+
+  useEffect(() => {
+    planRef.current = plan;
+  }, [plan]);
+
+  useEffect(() => {
+    sidebarTopicRef.current = sidebarTopic;
+  }, [sidebarTopic]);
+
+  const [sidebarTab, setSidebarTab] = useState<'plan' | 'history'>('plan');
+
+  const handleResumeSession = useCallback(async (session: any) => {
+    setSidebarTopic(session.topic);
+    setPlan(session.plan);
+    setSidebarTab('plan');
+    addNotification(`Resumed session: ${session.topic}`, 'success');
+
+    if (liveApiRef.current && connectionState === 'connected') {
+      liveApiRef.current.sendClientContent(
+        `SYSTEM: The user has resumed a previous learning session about "${session.topic}". 
+        The plan and progress have been restored in the sidebar. 
+        Current plan state: ${JSON.stringify(session.plan)}.
+        Please acknowledge this and continue the lesson from where you left off.`
+      );
+    }
+  }, [addNotification, connectionState]);
+
   // Enumerate audio input devices on mount
   useEffect(() => {
     async function getDevices() {
@@ -402,10 +453,11 @@ export default function App() {
 
     api.onToolCall = createToolHandler({
       liveApi: api,
-      plan,
+      planRef,
       setPlan,
       setIsGeneratingPlan,
       setSidebarTopic,
+      sidebarTopicRef,
       setIsSpawning,
       spawnTimerRef,
       addNotification,
@@ -557,92 +609,160 @@ export default function App() {
 
         {/* Learning Plan Sidebar */}
         <aside className="w-80 bg-zinc-50 border-l border-zinc-200 flex flex-col shadow-xl overflow-hidden">
-          <div className="p-6 border-b border-zinc-200 bg-white">
-            <h2 className="text-lg font-bold text-zinc-900 tracking-tight flex items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-600"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
-              Learning Plan
-            </h2>
-            {sidebarTopic && (
-              <p className="mt-1 text-sm text-zinc-500 font-medium">
-                Topic: <span className="text-blue-600">{sidebarTopic}</span>
-              </p>
+          <div className="p-4 border-b border-zinc-200 bg-white">
+            <div className="flex p-1 bg-zinc-100 rounded-lg mb-4">
+              <button
+                onClick={() => setSidebarTab('plan')}
+                className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${sidebarTab === 'plan' ? 'bg-white text-blue-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+              >
+                Current Plan
+              </button>
+              <button
+                onClick={() => {
+                  setSidebarTab('history');
+                  fetchSessions();
+                }}
+                className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${sidebarTab === 'history' ? 'bg-white text-blue-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+              >
+                History
+              </button>
+            </div>
+
+            {sidebarTab === 'plan' ? (
+              <>
+                <h2 className="text-lg font-bold text-zinc-900 tracking-tight flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-600"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+                  Learning Plan
+                </h2>
+                {sidebarTopic && (
+                  <p className="mt-1 text-sm text-zinc-500 font-medium">
+                    Topic: <span className="text-blue-600">{sidebarTopic}</span>
+                  </p>
+                )}
+              </>
+            ) : (
+              <h2 className="text-lg font-bold text-zinc-900 tracking-tight flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-600"><path d="M12 8V4H8"></path><rect width="16" height="12" x="4" y="8" rx="2"></rect><path d="M2 14h2"></path><path d="M20 14h2"></path><path d="M15 13v2"></path><path d="M9 13v2"></path></svg>
+                Past Sessions
+              </h2>
             )}
           </div>
 
           <div className="flex-1 overflow-y-auto p-6 space-y-4">
-            {isGeneratingPlan ? (
-              <div className="flex flex-col items-center justify-center h-40 space-y-3">
-                <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
-                <p className="text-sm font-medium text-zinc-500 italic">Designing your curriculum...</p>
-              </div>
-            ) : plan.length > 0 ? (
-              plan.map((topic, index) => (
-                <div
-                  key={topic.id}
-                  className={`p-4 rounded-xl border transition-all duration-300 ${
-                    topic.status === 'in_progress' ? 'bg-blue-50 border-blue-200 shadow-sm ring-1 ring-blue-100' :
-                    topic.status === 'completed' ? 'bg-green-50 border-green-200 opacity-80' :
-                    'bg-white border-zinc-200 hover:border-zinc-300'
-                  }`}
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${
-                          topic.status === 'in_progress' ? 'bg-blue-600 text-white' :
-                          topic.status === 'completed' ? 'bg-green-600 text-white' :
-                          'bg-zinc-200 text-zinc-500'
-                        }`}>
-                          {topic.status.replace('_', ' ')}
-                        </span>
-                        <span className="text-xs font-mono text-zinc-400">Step {index + 1}</span>
+            {sidebarTab === 'plan' ? (
+              isGeneratingPlan ? (
+                <div className="flex flex-col items-center justify-center h-40 space-y-3">
+                  <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                  <p className="text-sm font-medium text-zinc-500 italic">Designing your curriculum...</p>
+                </div>
+              ) : plan.length > 0 ? (
+                plan.map((topic, index) => (
+                  <div
+                    key={topic.id}
+                    className={`p-4 rounded-xl border transition-all duration-300 ${
+                      topic.status === 'in_progress' ? 'bg-blue-50 border-blue-200 shadow-sm ring-1 ring-blue-100' :
+                      topic.status === 'completed' ? 'bg-green-50 border-green-200 opacity-80' :
+                      'bg-white border-zinc-200 hover:border-zinc-300'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                            topic.status === 'in_progress' ? 'bg-blue-600 text-white' :
+                            topic.status === 'completed' ? 'bg-green-600 text-white' :
+                            'bg-zinc-200 text-zinc-500'
+                          }`}>
+                            {topic.status.replace('_', ' ')}
+                          </span>
+                          <span className="text-xs font-mono text-zinc-400">Step {index + 1}</span>
+                        </div>
+                        <h3 className={`font-bold text-sm ${topic.status === 'completed' ? 'text-zinc-500 line-through' : 'text-zinc-900'}`}>
+                          {topic.title}
+                        </h3>
+                        <p className="text-xs text-zinc-500 mt-1 leading-relaxed">{topic.description}</p>
+                        {topic.learning_outcome && (
+                          <div className="mt-2 text-[11px] text-blue-700 bg-blue-100/50 px-2 py-1 rounded border border-blue-100">
+                            <span className="font-bold uppercase text-[9px]">Outcome:</span> {topic.learning_outcome}
+                          </div>
+                        )}
+                        {topic.exercises && topic.exercises.length > 0 && (
+                          <div className="mt-2 text-[11px] text-amber-700 bg-amber-50 px-2 py-1 rounded border border-amber-100">
+                            <span className="font-bold uppercase text-[9px]">Practice:</span>
+                            <ul className="list-disc ml-3 mt-1 space-y-0.5">
+                              {topic.exercises.map((ex, i) => <li key={i}>{ex}</li>)}
+                            </ul>
+                          </div>
+                        )}
+                        {topic.examples && topic.examples.length > 0 && (
+                          <div className="mt-2 text-[11px] text-zinc-700 bg-zinc-100 px-2 py-1 rounded border border-zinc-200">
+                            <span className="font-bold uppercase text-[9px]">Examples:</span>
+                            <ul className="list-disc ml-3 mt-1 space-y-0.5">
+                              {topic.examples.map((ex, i) => <li key={i}>{ex}</li>)}
+                            </ul>
+                          </div>
+                        )}
+                        {topic.flow && (
+                          <div className="mt-2 text-[10px] text-zinc-400 italic">Next: {topic.flow}</div>
+                        )}
+                        {topic.notes && (
+                          <div className="mt-3 p-2 bg-black/5 rounded text-[11px] text-zinc-600 italic border-l-2 border-zinc-300">
+                            <strong>Note:</strong> {topic.notes}
+                          </div>
+                        )}
                       </div>
-                      <h3 className={`font-bold text-sm ${topic.status === 'completed' ? 'text-zinc-500 line-through' : 'text-zinc-900'}`}>
-                        {topic.title}
-                      </h3>
-                      <p className="text-xs text-zinc-500 mt-1 leading-relaxed">{topic.description}</p>
-                      {topic.learning_outcome && (
-                        <div className="mt-2 text-[11px] text-blue-700 bg-blue-100/50 px-2 py-1 rounded border border-blue-100">
-                          <span className="font-bold uppercase text-[9px]">Outcome:</span> {topic.learning_outcome}
-                        </div>
-                      )}
-                      {topic.exercises && topic.exercises.length > 0 && (
-                        <div className="mt-2 text-[11px] text-amber-700 bg-amber-50 px-2 py-1 rounded border border-amber-100">
-                          <span className="font-bold uppercase text-[9px]">Practice:</span>
-                          <ul className="list-disc ml-3 mt-1 space-y-0.5">
-                            {topic.exercises.map((ex, i) => <li key={i}>{ex}</li>)}
-                          </ul>
-                        </div>
-                      )}
-                      {topic.examples && topic.examples.length > 0 && (
-                        <div className="mt-2 text-[11px] text-zinc-700 bg-zinc-100 px-2 py-1 rounded border border-zinc-200">
-                          <span className="font-bold uppercase text-[9px]">Examples:</span>
-                          <ul className="list-disc ml-3 mt-1 space-y-0.5">
-                            {topic.examples.map((ex, i) => <li key={i}>{ex}</li>)}
-                          </ul>
-                        </div>
-                      )}
-                      {topic.flow && (
-                        <div className="mt-2 text-[10px] text-zinc-400 italic">Next: {topic.flow}</div>
-                      )}
-                      {topic.notes && (
-                        <div className="mt-3 p-2 bg-black/5 rounded text-[11px] text-zinc-600 italic border-l-2 border-zinc-300">
-                          <strong>Note:</strong> {topic.notes}
-                        </div>
-                      )}
                     </div>
                   </div>
+                ))
+              ) : (
+                <div className="flex flex-col items-center justify-center h-full text-center p-4">
+                  <div className="w-12 h-12 bg-zinc-100 rounded-full flex items-center justify-center mb-4">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-400"><path d="M12 8V4H8"></path><rect width="16" height="12" x="4" y="8" rx="2"></rect><path d="M2 14h2"></path><path d="M20 14h2"></path><path d="M15 13v2"></path><path d="M9 13v2"></path></svg>
+                  </div>
+                  <p className="text-sm font-medium text-zinc-500 italic">No plan active</p>
+                  <p className="text-xs text-zinc-400 mt-2 max-w-[200px]">
+                    Connect and tell the AI what you want to learn about to generate a structured curriculum.
+                  </p>
                 </div>
-              ))
+              )
             ) : (
-              <div className="flex flex-col items-center justify-center h-full text-center p-4">
-                <div className="w-12 h-12 bg-zinc-100 rounded-full flex items-center justify-center mb-4">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-400"><path d="M12 8V4H8"></path><rect width="16" height="12" x="4" y="8" rx="2"></rect><path d="M2 14h2"></path><path d="M20 14h2"></path><path d="M15 13v2"></path><path d="M9 13v2"></path></svg>
-                </div>
-                <p className="text-sm font-medium text-zinc-500 italic">No plan active</p>
-                <p className="text-xs text-zinc-400 mt-2 max-w-[200px]">
-                  Connect and tell the AI what you want to learn about to generate a structured curriculum.
-                </p>
+              <div className="space-y-3">
+                {isFetchingSessions ? (
+                  <div className="flex flex-col items-center justify-center h-40 space-y-3">
+                    <div className="w-6 h-6 border-3 border-zinc-300 border-t-blue-600 rounded-full animate-spin" />
+                    <p className="text-xs text-zinc-400">Loading history...</p>
+                  </div>
+                ) : pastSessions.length > 0 ? (
+                  pastSessions.map((session) => (
+                    <button
+                      key={session.id}
+                      onClick={() => handleResumeSession(session)}
+                      className="w-full text-left p-4 rounded-xl border border-zinc-200 bg-white hover:border-blue-300 hover:shadow-md transition-all group"
+                    >
+                      <div className="flex justify-between items-start mb-1">
+                        <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest group-hover:text-blue-500 transition-colors">
+                          {new Date(session.updatedAt).toLocaleDateString()}
+                        </span>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-300 group-hover:text-blue-500 transition-colors"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>
+                      </div>
+                      <h4 className="text-sm font-bold text-zinc-900 group-hover:text-blue-600 transition-colors">{session.topic}</h4>
+                      <div className="flex items-center gap-2 mt-2">
+                        <div className="flex -space-x-1">
+                          {session.plan.slice(0, 3).map((t: any, i: number) => (
+                            <div key={i} className={`w-2 h-2 rounded-full border border-white ${t.status === 'completed' ? 'bg-green-500' : 'bg-zinc-300'}`} />
+                          ))}
+                        </div>
+                        <span className="text-[10px] text-zinc-500 font-medium">
+                          {session.plan.filter((t: any) => t.status === 'completed').length}/{session.plan.length} topics done
+                        </span>
+                      </div>
+                    </button>
+                  ))
+                ) : (
+                  <div className="text-center py-12">
+                    <p className="text-sm text-zinc-400 italic">No saved sessions yet.</p>
+                  </div>
+                )}
               </div>
             )}
           </div>

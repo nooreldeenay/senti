@@ -11,8 +11,11 @@
   "dependencies": {
     "@google/genai": "^1.42.0",
     "@google/generative-ai": "^0.24.1",
+    "@opentelemetry/api": "^1.9.0",
     "@types/katex": "^0.16.8",
     "d3": "^7.9.0",
+    "firebase": "^12.10.0",
+    "firebase-admin": "^13.7.0",
     "function-plot": "^1.25.3",
     "html-to-image": "^1.11.13",
     "katex": "^0.16.38",
