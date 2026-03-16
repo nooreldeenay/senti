@@ -103,4 +103,12 @@ Navigate to `localhost:3000`, click **"Awaken Senti"**, and simply start speakin
 
 ---
 
+## 🏆 Gemini Live Agent Challenge: Bonus Points
+
+### 🤖 Automating Cloud Deployment (Bonus)
+This project includes a fully automated deployment pipeline to Google Cloud Run. You can find the automation logic here:
+- [deploy.sh](file:///c:/Users/noore/Projects/web/senti/deploy.sh): A comprehensive shell script that handles building the container with Google Cloud Build and deploying the service to Cloud Run with optimized configurations.
+
+---
+
 *Made with ❤️ for the future of decentralized, AI-first education.*
