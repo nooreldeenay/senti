@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/firebase-admin';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: Request) {
   try {
     const userId = req.headers.get('x-user-id');
@@ -19,7 +21,7 @@ export async function GET(req: Request) {
       .get();
 
     const sessions = snapshot.docs
-      .map(doc => {
+      .map((doc: any) => {
         const data = doc.data();
         return {
           id: doc.id,
@@ -27,7 +29,7 @@ export async function GET(req: Request) {
           updatedAt: data.updatedAt || new Date().toISOString()
         };
       })
-      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      .sort((a: any, b: any) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 
     return NextResponse.json({ sessions });
   } catch (error: any) {
