@@ -9,12 +9,12 @@ echo "🚀 Deploying $SERVICE_NAME to Google Cloud Run in $REGION..."
 
 # Build and Push using Cloud Build
 if [ -z "$NEXT_PUBLIC_TLDRAW_LICENSE_KEY" ]; then
-  echo "⚠️  Warning: NEXT_PUBLIC_TLDRAW_LICENSE_KEY is not set in your environment."
-  echo "The app will build without a license key."
+  echo "⚠️  Warning: NEXT_PUBLIC_TLDRAW_LICENSE_KEY is not set in your Cloud Shell environment."
+  echo "The app will build in 'Community Mode' (without a license key)."
 fi
 
-gcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE_NAME \
-  --build-arg NEXT_PUBLIC_TLDRAW_LICENSE_KEY=$NEXT_PUBLIC_TLDRAW_LICENSE_KEY
+gcloud builds submit --config cloudbuild.yaml \
+  --substitutions=_TLDRAW_KEY="$NEXT_PUBLIC_TLDRAW_LICENSE_KEY"
 
 # Deploy to Cloud Run
 gcloud run deploy $SERVICE_NAME \
