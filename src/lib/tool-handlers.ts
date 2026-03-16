@@ -180,10 +180,15 @@ export function createToolHandler(deps: ToolHandlerDeps) {
     // -----------------------------------------------------------------------
     } else if (name === 'save_learning_progress') {
       try {
+        const { getUserId } = await import('./user');
+        const userId = getUserId();
         const currentTopic = planRef.current.find(t => t.status === 'in_progress');
         const res = await fetch('/api/sessions/save', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'x-user-id': userId
+          },
           body: JSON.stringify({
             topic: sidebarTopicRef.current,
             plan: planRef.current,

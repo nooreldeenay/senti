@@ -14,6 +14,7 @@ import { customShapeUtils } from "@/lib/shape-utils";
 import { createToolHandler, LearningTopic } from "@/lib/tool-handlers";
 import { AgentOrb, AgentStatusType } from "@/components/AgentOrb";
 import { WakeUpAnimation } from "@/components/WakeUpAnimation";
+import { getUserId } from "@/lib/user";
 
 // Initialize Mermaid once at module level
 mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' });
@@ -37,7 +38,7 @@ const TldrawInner = memo(function TldrawInner({
   onResetPrinthead: React.MutableRefObject<(() => void) | null>;
 }) {
   const editor = useEditor();
-  
+
   // Track mount/unmount for debugging re-render loops
   useEffect(() => {
     console.log('[Vision] TldrawInner mounted');
@@ -140,7 +141,7 @@ const TldrawInner = memo(function TldrawInner({
 
   const doCapture = useCallback(async (isInitial = false) => {
     if (!liveApiRef.current) return false;
-    
+
     if (isCapturingRef.current) {
       console.log(`[Vision] [${performance.now().toFixed(0)}ms] Skip: Capture already in progress`);
       return false;
@@ -155,7 +156,7 @@ const TldrawInner = memo(function TldrawInner({
     const tid = isInitial ? 'Initial' : 'Incremental';
     console.log(`[Vision] [${performance.now().toFixed(0)}ms] Starting ${tid} capture of ${shapeIds.length} shapes...`);
     isCapturingRef.current = true;
-    
+
     try {
       const { blob } = await editor.toImage(shapeIds, {
         format: 'jpeg',
@@ -187,7 +188,7 @@ const TldrawInner = memo(function TldrawInner({
 
   const startIdleCapture = useCallback(() => {
     if (!isDirtyRef.current) return;
-    
+
     // If we're already capturing, don't clear timers! We want them to fire again 
     // to catch the change we just skipped.
     if (isCapturingRef.current) {
@@ -197,16 +198,16 @@ const TldrawInner = memo(function TldrawInner({
 
     console.log(`[Vision] [${performance.now().toFixed(0)}ms] Requesting idle callback...`);
     if (idleCallbackRef.current) cancelIdleCallback(idleCallbackRef.current);
-    
+
     idleCallbackRef.current = requestIdleCallback(
       async (deadline) => {
         if (!isDirtyRef.current) return;
-        
+
         const remaining = deadline.timeRemaining();
         if (remaining < 5 && !deadline.didTimeout) {
           console.log(`[Vision] [${performance.now().toFixed(0)}ms] Low idle time (${remaining.toFixed(1)}ms), but proceeding anyway to avoid starvation.`);
         }
-        
+
         const success = await doCapture();
         if (success) {
           console.log(`[Vision] [${performance.now().toFixed(0)}ms] Capture SUCCESS — clearing dirty flag`);
@@ -333,7 +334,9 @@ export default function App() {
   const fetchSessions = useCallback(async () => {
     setIsFetchingSessions(true);
     try {
-      const res = await fetch('/api/sessions/list');
+      const res = await fetch('/api/sessions/list', {
+        headers: { 'x-user-id': getUserId() }
+      });
       const data = await res.json();
       if (data.sessions) setPastSessions(data.sessions);
     } catch (err) {
@@ -342,6 +345,25 @@ export default function App() {
       setIsFetchingSessions(false);
     }
   }, []);
+
+  const handleDeleteSession = useCallback(async (e: React.MouseEvent, sessionId: string) => {
+    e.stopPropagation(); // prevent resuming when clicking delete
+    if (!confirm('Are you sure you want to delete this session?')) return;
+
+    try {
+      const res = await fetch(`/api/sessions/delete?id=${sessionId}`, {
+        method: 'DELETE',
+        headers: { 'x-user-id': getUserId() }
+      });
+      if (!res.ok) throw new Error('Failed to delete');
+      
+      setPastSessions(prev => prev.filter(s => s.id !== sessionId));
+      addNotification('Session deleted', 'success');
+    } catch (err) {
+      console.error('[Sessions] Delete error:', err);
+      addNotification('Failed to delete session', 'error');
+    }
+  }, [addNotification]);
 
   useEffect(() => {
     fetchSessions();
@@ -360,6 +382,22 @@ export default function App() {
   }, [sidebarTopic]);
 
   const [sidebarTab, setSidebarTab] = useState<'plan' | 'history'>('plan');
+
+  const handleClearPlan = useCallback(() => {
+    if (plan.length === 0) return;
+    if (confirm('Are you sure you want to clear the current learning plan?')) {
+      setPlan([]);
+      setSidebarTopic('');
+      addNotification('Current plan cleared', 'info');
+
+      if (liveApiRef.current && connectionState === 'connected') {
+        liveApiRef.current.sendClientContent(
+          `SYSTEM: The user has cleared the current learning plan. They want to start fresh or change topics. 
+          Please acknowledge the reset and ask what they would like to focus on now.`
+        );
+      }
+    }
+  }, [plan, addNotification, connectionState]);
 
   const handleResumeSession = useCallback(async (session: any) => {
     setSidebarTopic(session.topic);
@@ -481,15 +519,13 @@ export default function App() {
         {notifications.map(n => (
           <div
             key={n.id}
-            className={`px-4 py-3 rounded-lg shadow-2xl text-sm font-medium border animate-in slide-in-from-right fade-in pointer-events-auto flex items-center gap-3 min-w-[300px] ${
-              n.type === 'error' ? 'bg-red-50 border-red-200 text-red-700' :
+            className={`px-4 py-3 rounded-lg shadow-2xl text-sm font-medium border animate-in slide-in-from-right fade-in pointer-events-auto flex items-center gap-3 min-w-[300px] ${n.type === 'error' ? 'bg-red-50 border-red-200 text-red-700' :
               n.type === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
-              'bg-blue-50 border-blue-200 text-blue-700'
-            }`}
+                'bg-blue-50 border-blue-200 text-blue-700'
+              }`}
           >
-            <div className={`w-2 h-2 rounded-full shrink-0 ${
-              n.type === 'error' ? 'bg-red-500' : n.type === 'success' ? 'bg-emerald-500' : 'bg-blue-500'
-            }`} />
+            <div className={`w-2 h-2 rounded-full shrink-0 ${n.type === 'error' ? 'bg-red-500' : n.type === 'success' ? 'bg-emerald-500' : 'bg-blue-500'
+              }`} />
             {n.message}
           </div>
         ))}
@@ -498,82 +534,85 @@ export default function App() {
       {/* Header */}
       <header className="flex items-center justify-between px-6 py-4 bg-zinc-50 border-b border-zinc-200">
         <div className="flex items-center gap-4">
-          <h1 className="text-xl font-bold text-zinc-900 tracking-tight">Senti</h1>
-          <nav className="hidden sm:flex items-center gap-4 text-sm font-medium text-zinc-600">
-            <a href="#" className="hover:text-zinc-900 transition-colors">Home</a>
-            <a href="#" className="hover:text-zinc-900 transition-colors">About</a>
-            <a href="#" className="hover:text-zinc-900 transition-colors">Settings</a>
-          </nav>
+          <h1 className="text-2xl font-extralight tracking-[0.3em] font-sans text-zinc-900 uppercase select-none">senti</h1>
         </div>
 
         {/* Connection Controls */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
           {connectionState === 'error' && (
-            <span className="text-sm font-medium text-red-600 max-w-[200px] truncate" title={errorMsg}>
-              {errorMsg}
-            </span>
+            <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 bg-red-50 border border-red-100 rounded-full">
+              <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+              <span className="text-xs font-semibold text-red-600 truncate max-w-[150px]" title={errorMsg}>
+                {errorMsg}
+              </span>
+            </div>
           )}
 
-          <select
-            className="text-sm border border-zinc-300 rounded-md px-2 py-1 bg-white truncate max-w-[150px]"
-            value={selectedAudioId}
-            onChange={handleDeviceChange}
-          >
-            {devices.map(d => (
-              <option key={d.deviceId} value={d.deviceId}>
-                {d.label || `Microphone ${d.deviceId.slice(0, 5)}...`}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center bg-white border border-zinc-200 rounded-full p-1 shadow-sm">
+            <div className="flex items-center gap-1.5 px-3 py-1 border-r border-zinc-100">
+              <div className={`w-2 h-2 rounded-full ${connectionState === 'connected' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' :
+                connectionState === 'connecting' ? 'bg-amber-500 animate-pulse' :
+                  connectionState === 'error' ? 'bg-rose-500' : 'bg-zinc-300'
+                }`} />
+              <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">{connectionState}</span>
+            </div>
 
-          {/* Mute toggle with volume ring */}
-          <button
-            onClick={handleMuteToggle}
-            className={`p-2 rounded-full border transition-colors flex items-center justify-center ${
-              isMuted ? 'bg-red-100 border-red-300 text-red-600' : 'bg-white border-zinc-300 text-zinc-600 hover:bg-zinc-100'
-            }`}
-            title={isMuted ? 'Unmute' : 'Mute'}
-          >
-            {isMuted ? (
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
-            ) : (
+            <div className="flex items-center gap-1 px-2">
+              <button
+                onClick={handleMuteToggle}
+                className={`relative w-8 h-8 rounded-full transition-all flex items-center justify-center ${isMuted ? 'bg-rose-50 text-rose-500' : 'bg-transparent text-zinc-400 hover:text-zinc-600'
+                  }`}
+                title={isMuted ? 'Unmute' : 'Mute'}
+              >
+                {!isMuted && (
+                  <div
+                    ref={volumeRingRef}
+                    className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-400/10 transition-all duration-75 pointer-events-none"
+                    style={{ width: '20px', height: '20px' }}
+                  />
+                )}
+                {isMuted ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+                ) : (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+                    <div
+                      ref={gateIndicatorRef}
+                      className="absolute bottom-1.5 right-1.5 w-1.5 h-1.5 rounded-full border border-white bg-rose-500 shadow-sm"
+                    />
+                  </>
+                )}
+              </button>
+
               <div className="relative">
-                {/* Volume Ring — updated directly via DOM ref (no React re-renders) */}
-                <div
-                  ref={volumeRingRef}
-                  className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-400/20 transition-all duration-75 pointer-events-none"
-                  style={{ width: '24px', height: '24px' }}
-                />
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
-                {/* Noise gate indicator dot — also updated via DOM ref */}
-                <div
-                  ref={gateIndicatorRef}
-                  className="absolute -bottom-1 -right-1 w-2 h-2 rounded-full border border-white shadow-sm bg-red-500"
-                  title="Signal too low (Noise Gate active)"
-                />
+                <select
+                  className="text-[11px] font-bold text-zinc-600 bg-transparent border-none focus:ring-0 cursor-pointer max-w-[120px] pr-5 truncate appearance-none hover:text-zinc-900 transition-colors"
+                  value={selectedAudioId}
+                  onChange={handleDeviceChange}
+                >
+                  {devices.map(d => (
+                    <option key={d.deviceId} value={d.deviceId}>
+                      {d.label || `Mic ${d.deviceId.slice(0, 5)}`}
+                    </option>
+                  ))}
+                </select>
+                <div className="absolute right-0 top-1/2 -translate-y-1/2 pointer-events-none">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-400"><path d="m6 9 6 6 6-6"></path></svg>
+                </div>
               </div>
-            )}
-          </button>
-
-          <div className="flex items-center gap-2 text-sm font-medium mr-2">
-            <div className={`w-2.5 h-2.5 rounded-full ${
-              connectionState === 'connected' ? 'bg-green-500' :
-              connectionState === 'connecting' ? 'bg-yellow-500 animate-pulse' :
-              connectionState === 'error' ? 'bg-red-500' : 'bg-zinc-400'
-            }`} />
-            <span className="capitalize text-zinc-700">{connectionState}</span>
+            </div>
           </div>
 
           <button
+            id="connect-button"
             onClick={toggleConnection}
             disabled={connectionState === 'connecting'}
-            className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
-              connectionState === 'connected'
-                ? 'bg-zinc-200 text-zinc-900 hover:bg-zinc-300'
-                : 'bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50'
-            }`}
+            className={`h-9 px-6 rounded-full text-xs font-bold tracking-tight transition-all duration-300 relative ${connectionState === 'connected'
+              ? 'bg-zinc-900 text-white hover:bg-zinc-800'
+              : `bg-linear-to-r from-blue-600 via-indigo-600 to-blue-600 text-white hover:shadow-[0_0_20px_rgba(37,99,235,0.4)] disabled:opacity-50 animate-gradient ${connectionState === 'disconnected' ? 'animate-glow-blue' : ''}`
+              }`}
           >
-            {connectionState === 'connected' ? 'Disconnect' : 'Connect AI'}
+            {connectionState === 'connected' ? 'Disconnect' : 'Awaken Senti'}
           </button>
         </div>
       </header>
@@ -630,10 +669,20 @@ export default function App() {
 
             {sidebarTab === 'plan' ? (
               <>
-                <h2 className="text-lg font-bold text-zinc-900 tracking-tight flex items-center gap-2">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-600"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
-                  Learning Plan
-                </h2>
+                <div className="flex items-center justify-between group">
+                  <h2 className="text-lg font-bold text-zinc-900 tracking-tight flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-600"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+                    Learning Plan
+                  </h2>
+                  {plan.length > 0 && (
+                    <button 
+                      onClick={handleClearPlan}
+                      className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 hover:text-rose-500 transition-colors"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
                 {sidebarTopic && (
                   <p className="mt-1 text-sm text-zinc-500 font-medium">
                     Topic: <span className="text-blue-600">{sidebarTopic}</span>
@@ -659,20 +708,18 @@ export default function App() {
                 plan.map((topic, index) => (
                   <div
                     key={topic.id}
-                    className={`p-4 rounded-xl border transition-all duration-300 ${
-                      topic.status === 'in_progress' ? 'bg-blue-50 border-blue-200 shadow-sm ring-1 ring-blue-100' :
+                    className={`p-4 rounded-xl border transition-all duration-300 ${topic.status === 'in_progress' ? 'bg-blue-50 border-blue-200 shadow-sm ring-1 ring-blue-100' :
                       topic.status === 'completed' ? 'bg-green-50 border-green-200 opacity-80' :
-                      'bg-white border-zinc-200 hover:border-zinc-300'
-                    }`}
+                        'bg-white border-zinc-200 hover:border-zinc-300'
+                      }`}
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1">
-                          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${
-                            topic.status === 'in_progress' ? 'bg-blue-600 text-white' :
+                          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${topic.status === 'in_progress' ? 'bg-blue-600 text-white' :
                             topic.status === 'completed' ? 'bg-green-600 text-white' :
-                            'bg-zinc-200 text-zinc-500'
-                          }`}>
+                              'bg-zinc-200 text-zinc-500'
+                            }`}>
                             {topic.status.replace('_', ' ')}
                           </span>
                           <span className="text-xs font-mono text-zinc-400">Step {index + 1}</span>
@@ -734,16 +781,26 @@ export default function App() {
                   </div>
                 ) : pastSessions.length > 0 ? (
                   pastSessions.map((session) => (
-                    <button
+                    <div
                       key={session.id}
+                      role="button"
                       onClick={() => handleResumeSession(session)}
-                      className="w-full text-left p-4 rounded-xl border border-zinc-200 bg-white hover:border-blue-300 hover:shadow-md transition-all group"
+                      className="w-full text-left p-4 rounded-xl border border-zinc-200 bg-white hover:border-blue-300 hover:shadow-md transition-all group relative cursor-pointer"
                     >
                       <div className="flex justify-between items-start mb-1">
                         <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest group-hover:text-blue-500 transition-colors">
                           {new Date(session.updatedAt).toLocaleDateString()}
                         </span>
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-300 group-hover:text-blue-500 transition-colors"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={(e) => handleDeleteSession(e, session.id)}
+                            className="p-1.5 rounded-md text-zinc-300 hover:text-rose-500 hover:bg-rose-50 transition-all opacity-0 group-hover:opacity-100"
+                            title="Delete session"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>
+                          </button>
+                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-300 group-hover:text-blue-500 transition-colors"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>
+                        </div>
                       </div>
                       <h4 className="text-sm font-bold text-zinc-900 group-hover:text-blue-600 transition-colors">{session.topic}</h4>
                       <div className="flex items-center gap-2 mt-2">
@@ -756,21 +813,21 @@ export default function App() {
                           {session.plan.filter((t: any) => t.status === 'completed').length}/{session.plan.length} topics done
                         </span>
                       </div>
-                    </button>
+                    </div>
                   ))
                 ) : (
-                  <div className="text-center py-12">
+                  <div className="text-center py-12 px-4">
+                    <div className="w-12 h-12 bg-zinc-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-300"><path d="M12 8V4H8"></path><rect width="16" height="12" x="4" y="8" rx="2"></rect><path d="M2 14h2"></path><path d="M20 14h2"></path><path d="M15 13v2"></path><path d="M9 13v2"></path></svg>
+                    </div>
                     <p className="text-sm text-zinc-400 italic">No saved sessions yet.</p>
+                    <p className="text-xs text-zinc-400 mt-3 leading-relaxed">
+                      You can tell the agent to <span className="text-blue-500 font-bold">"save our session"</span> to keep your progress synchronized here.
+                    </p>
                   </div>
                 )}
               </div>
             )}
-          </div>
-
-          <div className="p-4 bg-zinc-100 border-t border-zinc-200">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Socratic AI Engine</span>
-            </div>
           </div>
         </aside>
       </div>
