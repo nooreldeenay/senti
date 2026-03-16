@@ -356,7 +356,7 @@ export default function App() {
         headers: { 'x-user-id': getUserId() }
       });
       if (!res.ok) throw new Error('Failed to delete');
-      
+
       setPastSessions(prev => prev.filter(s => s.id !== sessionId));
       addNotification('Session deleted', 'success');
     } catch (err) {
@@ -622,7 +622,7 @@ export default function App() {
         {/* Whiteboard */}
         <main className="flex-1 relative">
           <div className="absolute inset-0">
-            <Tldraw persistenceKey="senti-tldraw" shapeUtils={customShapeUtils}>
+            <Tldraw licenseKey={process.env.NEXT_PUBLIC_TLDRAW_LICENSE_KEY} shapeUtils={customShapeUtils}>
               <TldrawInner
                 isConnected={connectionState === 'connected'}
                 liveApiRef={liveApiRef}
@@ -675,7 +675,7 @@ export default function App() {
                     Learning Plan
                   </h2>
                   {plan.length > 0 && (
-                    <button 
+                    <button
                       onClick={handleClearPlan}
                       className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 hover:text-rose-500 transition-colors"
                     >
