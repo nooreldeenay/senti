@@ -622,8 +622,8 @@ export default function App() {
         {/* Whiteboard */}
         <main className="flex-1 relative">
           <div className="absolute inset-0">
-            <Tldraw 
-              {...(process.env.NEXT_PUBLIC_TLDRAW_LICENSE_KEY ? { licenseKey: process.env.NEXT_PUBLIC_TLDRAW_LICENSE_KEY } : {})}
+            <Tldraw
+              licenseKey={process.env.NEXT_PUBLIC_TLDRAW_LICENSE_KEY}
               shapeUtils={customShapeUtils}
             >
               <TldrawInner
